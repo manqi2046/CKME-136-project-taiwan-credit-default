@@ -1,0 +1,260 @@
+---
+title: "CKME 136 Project"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+  word_document: default
+---
+
+1. data preparation
+
+
+
+#5.1 full data classification
+```{r}
+## Classification Results
+
+df= data.frame(read.csv("/Users/jingjingsun/Desktop/df.csv",header = T, stringsAsFactors = T))
+df2=data.frame(read.csv("/Users/jingjingsun/Desktop/df2.csv",header = T, stringsAsFactors = T))
+df=df[,-1]
+df2=df2[,-1]
+df$DEFAULT=as.factor(df$DEFAULT)
+df2$DEFAULT=as.factor(df2$DEFAULT)
+```
+
+
+
+```{r}
+##nested train function with doParallel
+
+nested_train<-function(df,class,k_out,classifier,k_in,sampling=NULL,metric="Accuracy",tunegrid=NULL,tunelength=3){
+  library(caret)
+  library(glmnet)
+  library(lattice)
+  library(grid)
+  library(pROC)
+  library(e1071)
+  library(caTools)
+  library(kernlab)
+  library(randomForest)
+  library(DMwR)
+  library(ggplot2)
+  library(caretEnsemble)
+  library(naivebayes)
+  levels(df[,class])=make.names(levels(df[,class]))
+  ##create a reproducible kfolds dataset
+  set.seed(100)
+  outerflds <- createFolds(df[,class], k = k_out, list = TRUE, returnTrain = FALSE)
+  ##create seeds for trainControl()
+  set.seed(200)
+  seeds <- vector(mode = "list", length = k_in+1)
+  for(i in 1:k_in) seeds[[i]]<- sample.int(n=1000, tunelength)
+  seeds[[k_in+1]]<-sample.int(1000, 1)
+  if (metric=="Accuracy"){
+    ##seting Accuracy control
+    train_ctrl<-trainControl(method='cv', number=k_in,sampling=sampling,seeds = seeds)
+    }else if(metric=="ROC"){
+    ##seting ROC control
+    train_ctrl<-trainControl(method='cv', number=k_in,classProbs = T,summaryFunction = twoClassSummary,sampling=sampling,seeds=seeds)
+    }else{
+    stop("Metric should either be 'Accuracy' or 'ROC'")
+      } 
+  ##registerDoParallel and using %dorng% to parallel the loop and make reproducible results. 
+  library(doParallel)
+  library(doRNG)
+  library(foreach)
+  ##doing out_train by parallel
+  cl<-makePSOCKcluster(2)
+  registerDoParallel(cl)
+  set.seed(300)
+  ##parallel inner loop's k_in folds Cross-Validations of trainingsets which come from theouter loops (k_out） 
+  Model_results<-foreach(i=1:k_out,.packages=c('caret','glmnet')) %dorng%{
+     train_out=df[-outerflds[[i]],]
+      ###training the model by k_in folds cross-validation defined in train_ctrl
+     train(x=train_out[,colnames(train_out)!=class],y=train_out[,class],trControl=train_ctrl,method=classifier,metric=metric,tuneGrid=tunegrid,tuneLength=tunelength)
+  }
+  if (metric=="Accuracy"){
+    ###using outer loop's testingsets to test the optimal model choosen from inner_loops 
+    test_out=df[outerflds[[i]],]
+    set.seed(400)
+    Pred_results<-foreach(i=1:k_out,.packages=c('caret','glmnet')) %dorng%{
+    confusionMatrix(predict(Model_results[[i]],test_out),test_out[,class], positive="X1")
+      }
+    }else{
+    test_out=df[outerflds[[i]],]
+    set.seed(500)
+    Pred_results<-foreach(i=1:k_out,.packages=c('caret','glmnet','pROC')) %dorng%{
+    roc(test_out[,class],predict(Model_results[[i]],test_out,type="prob")[,"X1"],levels=c("X0","X1"))
+      }
+  }
+  stopCluster(cl)
+  results=list(Models_resulst=Model_results,Pred_results=Pred_results)
+  return(results)
+}  
+
+```
+
+```{r}
+##Function to get metrics from modeling results.
+
+get_metrics<-function(result1,result2,names){
+  if (length(result1$Models_resulst[[i]]$bestTune)==1){
+    results=data.frame(matrix(NA,nrow=5,ncol=8))#setting the total number of metrics you want to reach.
+    colnames(results)=c('methods','OutLoop_No','Accuracy','Recall','F1','AUC','Acc_BestTune','ROC_BestTune')
+    results[,1:2]=as.character(results[,1])
+    for(i in 1:5){
+      results[i,]<-c(names[i],i,result1$Pred_results[[i]]$overall["Accuracy"],result1$Pred_results[[i]]$byClass[c("Recall","F1")],result2$Pred_results[[i]]$auc,result1$Models_resulst[[i]]$bestTune,result2$Models_resulst[[i]]$bestTune)
+    }
+  }else if (length(result1$Models_resulst[[i]]$bestTune)==2){##some model has two tune parameters
+    results=data.frame(matrix(NA,nrow=5,ncol=10))
+    colnames(results)=c('methods','OutLoop_No','Accuracy','Recall','F1','AUC','Acc_BestTune1','Acc_BestTune2','ROC_BestTune1','ROC_BestTune2')
+    results[,1:2]=as.character(results[,1])
+    for(i in 1:5){
+      results[i,]<-c(names[i],i,result1$Pred_results[[i]]$overall["Accuracy"],result1$Pred_results[[i]]$byClass[c("Recall","F1")],result2$Pred_results[[i]]$auc,result1$Models_resulst[[i]]$bestTune,result2$Models_resulst[[i]]$bestTune)
+   }}else if(length(result1$Models_resulst[[i]]$bestTune)==3){##some model has two tune parameters
+    results=data.frame(matrix(NA,nrow=5,ncol=12))
+    colnames(results)=c('methods','OutLoop_No','Accuracy','Recall','F1','AUC','Acc_BestTune1','Acc_BestTune2','Acc_BestTune3','ROC_BestTune1','ROC_BestTune2','ROC_BestTune3')
+    results[,1:2]=as.character(results[,1])
+    for(i in 1:5){
+      results[i,]<-c(names[i],i,result1$Pred_results[[i]]$overall["Accuracy"],result1$Pred_results[[i]]$byClass[c("Recall","F1")],result2$Pred_results[[i]]$auc,result1$Models_resulst[[i]]$bestTune,result2$Models_resulst[[i]]$bestTune) 
+    }
+   }
+  return(results)
+}
+```
+
+
+
+
+```{r}
+#1.rpart
+
+##"Accuracy"
+df_rp_Acc=nested_train(df,'DEFAULT',5,"rpart",5,sampling=NULL,metric="Accuracy",tunelength = 5)
+df2_rp_Acc=nested_train(df2,'DEFAULT',5,"rpart",5,sampling=NULL,metric="Accuracy",tunelength = 5)
+df_rp_smote_Acc=nested_train(df,'DEFAULT',5,"rpart",5,sampling='smote',metric="Accuracy",tunelength = 5)
+df2_rp_smote_Acc=nested_train(df2,'DEFAULT',5,"rpart",5,sampling='smote',metric="Accuracy",tunelength = 5)
+
+##"ROC"
+df_rp_ROC=nested_train(df,'DEFAULT',5,"rpart",5,sampling=NULL,metric = "ROC",tunelength = 5)
+df2_rp_ROC=nested_train(df2,'DEFAULT',5,"rpart",5,sampling=NULL,metric = "ROC",tunelength = 5)
+df_rp_smote_ROC=nested_train(df,'DEFAULT',5,"rpart",5,sampling="smote",metric = "ROC",tunelength = 5)
+df2_rp_smote_ROC=nested_train(df2,'DEFAULT',5,"rpart",5,sampling="smote",metric = "ROC",tunelength = 5)
+```
+
+
+
+```{r}
+result1=list(df_rp_Acc,df2_rp_Acc,df_rp_smote_Acc,df2_rp_smote_Acc)
+result2=list(df_rp_ROC,df2_rp_ROC,df_rp_smote_ROC,df2_rp_smote_ROC)
+names=list(name1=rep('T88_rpart',5),name2=rep('T48_rpart',5),name3=rep('T88_smote_rpart',5),name4=rep('T48_smote_rpart',5))
+
+Results=mapply(get_metrics,result1,result2,names)
+final=data.frame(matrix(NA,nrow=5,ncol=8))#ncol= the  numbers of the metrics we need to output,Because besttune have length=1 so the total ncol=8
+finals=list(r1=final,r2=final,r3=final,r4=final)
+for (i in 1:4) finals[[i]]=as.data.frame(Results[,i])
+rp_final=rbind(finals[[1]],finals[[2]],finals[[3]],finals[[4]])
+rp_final
+write.csv(rp_final,'rp_final.csv')
+```
+
+
+```{r}
+#2.LogitBoost
+
+##Accuracy
+df_lg_Acc=nested_train(df,'DEFAULT',5,'LogitBoost',5,sampling=NULL,metric="Accuracy",tunelength = 5)
+df2_lg_Acc=nested_train(df2,'DEFAULT',5,'LogitBoost',5,sampling=NULL,metric="Accuracy",tunelength = 5)
+df_lg_smote_Acc=nested_train(df,'DEFAULT',5,'LogitBoost',5,sampling="smote",metric="Accuracy",tunelength = 5)
+df2_lg_smote_Acc=nested_train(df2,'DEFAULT',5,'LogitBoost',5,sampling="smote",metric="Accuracy",tunelength = 5)
+
+##ROC
+df_lg_ROC=nested_train(df,'DEFAULT',5,"LogitBoost",5,sampling=NULL,metric="ROC",tunelength = 5)
+df2_lg_ROC=nested_train(df2,'DEFAULT',5,"LogitBoost",5,sampling=NULL,metric="ROC",tunelength = 5)
+df_lg_smote_ROC=nested_train(df,'DEFAULT',5,"LogitBoost",5,sampling='smote',metric="ROC",tunelength = 5)
+df2_lg_smote_ROC=nested_train(df2,'DEFAULT',5,"LogitBoost",5,sampling='smote',metric="ROC",tunelength = 5)
+
+```
+
+
+```{r}
+result1=list(df_lg_Acc,df2_lg_Acc,df_lg_smote_Acc,df2_lg_smote_Acc)
+result2=list(df_lg_ROC,df2_lg_ROC,df_lg_smote_ROC,df2_lg_smote_ROC)
+names=list(name1=rep('T88_lgBoost',5),name2=rep('T48_lgBoost',5),name3=rep('T88_smote_lgBoost',5),name4=rep('T48_smote_lgBoost',5))
+
+Results=mapply(get_metrics,result1,result2,names)
+final=data.frame()
+finals=list(r1=final,r2=final,r3=final,r4=final)
+for (i in 1:4) finals[[i]]=as.data.frame(Results[,i])
+lg_final=rbind(finals[[1]],finals[[2]],finals[[3]],finals[[4]])
+lg_final
+write.csv(lg_final,'lg_final.csv')
+```
+
+
+```{r}
+#3.glmnet
+
+##Accuracy
+df_net_Acc=nested_train(df,'DEFAULT',5,'glmnet',5,sampling=NULL,metric="Accuracy",tunelength = 5)
+df2_net_Acc=nested_train(df2,'DEFAULT',5,'glmnet',5,sampling=NULL,metric="Accuracy",tunelength = 5)
+df_net_smote_Acc=nested_train(df,'DEFAULT',5,'glmnet',5,sampling="smote",metric="Accuracy",tunelength = 5)
+df2_net_smote_Acc=nested_train(df2,'DEFAULT',5,'glmnet',5,sampling="smote",metric="Accuracy",tunelength = 5)
+
+##ROC
+df_net_ROC=nested_train(df,'DEFAULT',5,"glmnet",5,sampling=NULL,metric="ROC",tunelength = 5)
+df2_net_ROC=nested_train(df2,'DEFAULT',5,"glmnet",5,sampling=NULL,metric="ROC",tunelength = 5)
+df_net_smote_ROC=nested_train(df,'DEFAULT',5,"glmnet",5,sampling='smote',metric="ROC",tunelength = 5)
+df2_net_smote_ROC=nested_train(df2,'DEFAULT',5,"glmnet",5,sampling='smote',metric="ROC",tunelength = 5)
+
+```
+
+
+```{r}
+result1=list(df_net_Acc,df2_net_Acc,df_net_smote_Acc,df2_net_smote_Acc)
+result2=list(df_net_ROC,df2_net_ROC,df_net_smote_ROC,df2_net_smote_ROC)
+names=list(name1=rep('T88_net',5),name2=rep('T48_net',5),name3=rep('T88_smote_net',5),name4=rep('T48_smote_net',5))
+
+Results=mapply(get_metrics,result1,result2,names)
+final=data.frame()
+finals=list(r1=final,r2=final,r3=final,r4=final)
+for (i in 1:4) finals[[i]]=as.data.frame(Results[,i])
+net_final=rbind(finals[[1]],finals[[2]],finals[[3]],finals[[4]])
+net_final
+write.csv(net_final,'net_final.csv')
+```
+
+
+
+```{r}
+#4.Naive Bayes
+##"Accuracy"
+df_nb_Acc=nested_train(df,'DEFAULT',5,"naive_bayes",5,sampling=NULL,metric="Accuracy",tunelength = 5)
+df2_nb_Acc=nested_train(df2,'DEFAULT',5,"naive_bayes",5,sampling=NULL,metric="Accuracy",tunelength = 5)
+df_nb_smote_Acc=nested_train(df,'DEFAULT',5,"naive_bayes",5,sampling='smote',metric="Accuracy",tunelength = 5)
+df2_nb_smote_Acc=nested_train(df2,'DEFAULT',5,"naive_bayes",5,sampling='smote',metric="Accuracy",tunelength = 5)
+
+##"ROC"
+df_nb_ROC=nested_train(df,'DEFAULT',5,"naive_bayes",5,sampling=NULL,metric = "ROC",tunelength = 5)
+df2_nb_ROC=nested_train(df2,'DEFAULT',5,"naive_bayes",5,sampling=NULL,metric = "ROC",tunelength = 5)
+df_nb_smote_ROC=nested_train(df,'DEFAULT',5,"naive_bayes",5,sampling="smote",metric = "ROC",tunelength = 5)
+df2_nb_smote_ROC=nested_train(df2,'DEFAULT',5,"naive_bayes",5,sampling="smote",metric = "ROC",tunelength = 5)
+
+```
+
+```{r}
+result1=list(df_nb_Acc,df2_nb_Acc,df_nb_smote_Acc,df2_nb_smote_Acc)
+result2=list(df_nb_ROC,df2_nb_ROC,df_nb_smote_ROC,df2_nb_smote_ROC)
+names=list(name1=rep('T88_NaiveBayes',5),name2=rep('T48_NaiveBayes',5),name3=rep('T88_smote_NaiveBayes',5),name4=rep('T48_smote_NaiveBayes',5))
+
+Results=mapply(get_metrics,result1,result2,names)
+final=data.frame(matrix(NA,nrow=5,ncol=8))
+finals=list(r1=final,r2=final,r3=final,r4=final)
+for (i in 1:4) finals[[i]]=as.data.frame(Results[,i])
+nb_final=rbind(finals[[1]],finals[[2]],finals[[3]],finals[[4]])
+nb_final
+write.csv(nb_final,'nb_final.csv')
+```
+
+`
